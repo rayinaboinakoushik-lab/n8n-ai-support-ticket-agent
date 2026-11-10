@@ -25,6 +25,10 @@ flowchart LR
     T --> L[One row in Google Sheets<br/>= webhook response]
 ```
 
+The workflow in n8n:
+
+![The ticket_processing workflow in n8n](docs/images/workflow.png)
+
 | Status | Meaning | Email to team | Reply shown to the customer |
 |---|---|---|---|
 | `opened` | Valid classification, confidence >= 0.6, message long enough to judge | critical/high: urgent; medium: summary; low: none | yes |
@@ -48,6 +52,10 @@ Six test tickets cover every path (`tests/test_tickets.ps1`, or `tests/test_tick
 | 6 | Invalid email address | rejected: "invalid email format" |
 
 Testing my own first version found real problems: low-confidence tickets still sent emails, top-3 retrieval created three parallel runs (duplicate drafts and emails), a wiring error dropped low-urgency tickets, and a vague ticket was rated 0.85 confident by the model. All are fixed and re-tested; details in [docs/CHANGELOG.md](docs/CHANGELOG.md).
+
+Summary email the team received for ticket 2 (test data):
+
+<img src="docs/images/email-summary.png" alt="Summary email for a medium-priority billing ticket" width="480">
 
 ## Design decisions
 
