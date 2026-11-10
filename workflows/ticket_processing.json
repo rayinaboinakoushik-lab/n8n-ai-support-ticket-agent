@@ -1,0 +1,961 @@
+{
+  "name": "ticket_processing",
+  "nodes": [
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "support-ticket",
+        "responseMode": "lastNode",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2.1,
+      "position": [
+        -600,
+        300
+      ],
+      "id": "b9cf48f3-9a2c-40da-a36f-a3ebece8b1fb",
+      "name": "Webhook",
+      "webhookId": "1fcd99be-c1c6-4922-bcf6-2f4178893fcc"
+    },
+    {
+      "parameters": {
+        "jsCode": "// Normalise the request and check required fields + email format.\nconst b = $json.body ?? $json;\nconst t = {\n  name: String(b.name ?? '').trim(),\n  email: String(b.email ?? '').trim(),\n  subject: String(b.subject ?? '').trim(),\n  message: String(b.message ?? '').trim(),\n};\nconst reasons = Object.keys(t).filter(k => !t[k]).map(k => `missing ${k}`);\nif (t.email && !/^[^\\s@]+@[^\\s@]+\\.[^\\s@]+$/.test(t.email)) reasons.push('invalid email format');\nreturn { json: { ...t, valid: reasons.length === 0, rejection_reason: reasons.join(', ') } };",
+        "mode": "runOnceForEachItem"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -380,
+        300
+      ],
+      "id": "3115cf83-0074-462a-a498-b0482b23b300",
+      "name": "Validate ticket"
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "loose",
+            "version": 3
+          },
+          "conditions": [
+            {
+              "id": "ea0fff41-1d24-4d2f-ae6e-fe3e22d566d5",
+              "leftValue": "={{ $json.valid }}",
+              "rightValue": "",
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "looseTypeValidation": true,
+        "options": {}
+      },
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.3,
+      "position": [
+        -160,
+        300
+      ],
+      "id": "ab282e44-87a5-4e2e-b641-f73ed75bb7c2",
+      "name": "Ticket valid?"
+    },
+    {
+      "parameters": {
+        "assignments": {
+          "assignments": [
+            {
+              "id": "554b8fc1-131b-4ad1-a3c1-012564ef59c3",
+              "name": "status",
+              "value": "rejected",
+              "type": "string"
+            }
+          ]
+        },
+        "includeOtherFields": true,
+        "options": {}
+      },
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.4,
+      "position": [
+        60,
+        520
+      ],
+      "id": "8af36998-e8f9-4382-8866-902351d75bdf",
+      "name": "Reject invalid ticket"
+    },
+    {
+      "parameters": {
+        "modelId": {
+          "__rl": true,
+          "value": "gpt-4o-mini",
+          "mode": "list",
+          "cachedResultName": "GPT-4O-MINI"
+        },
+        "responses": {
+          "values": [
+            {
+              "content": "=You are an AI support ticket classifier.\n\nAnalyze the support ticket and return STRICT JSON only.\n\nTicket Information:\nName: {{ $json.name }}\nEmail: {{ $json.email }}\nSubject: {{ $json.subject }}\nMessage: {{ $json.message }}\n\nClassify the ticket and return the following JSON structure:\n\n{\n  \"category\": \"billing | technical | account | refund | other\",\n  \"urgency\": \"critical | high | medium | low\",\n  \"sentiment\": \"positive | neutral | negative\",\n  \"confidence\": 0-1,\n  \"summary\": \"short summary of the issue\"\n}\n\nRules:\nReturn ONLY JSON.\nNo explanation.\nNo text outside JSON.\nConfidence must be between 0 and 1.\n\nIf the message does not clearly describe a specific problem, set confidence to 0.4 or lower."
+            },
+            {
+              "role": "system",
+              "content": "You are an AI support ticket classifier.\nReturn JSON only. Do not explain anything.\n\nIf the message does not clearly describe a specific problem, set confidence to 0.4 or lower."
+            }
+          ]
+        },
+        "builtInTools": {},
+        "options": {
+          "temperature": 0
+        }
+      },
+      "type": "@n8n/n8n-nodes-langchain.openAi",
+      "typeVersion": 2.1,
+      "position": [
+        60,
+        200
+      ],
+      "id": "26f0e996-f2aa-404b-8a16-cf9fb3f78e6c",
+      "name": "Classify ticket",
+      "retryOnFail": true,
+      "maxTries": 2,
+      "onError": "continueRegularOutput"
+    },
+    {
+      "parameters": {
+        "jsCode": "// Clean the model output, parse it and check every field before anything else uses it.\nconst ticket = $('Validate ticket').item.json;\nconst CATS = ['billing', 'technical', 'account', 'refund', 'other'];\nconst URG = ['critical', 'high', 'medium', 'low'];\nconst SENT = ['positive', 'neutral', 'negative'];\nlet c = {}, error = null;\ntry {\n  let text = $json.output?.[0]?.content?.[0]?.text ?? '';\n  text = text.replace(/```json/gi, '').replace(/```/g, '').trim();\n  c = JSON.parse(text);\n  const bad = [];\n  if (!CATS.includes(c.category)) bad.push('category');\n  if (!URG.includes(c.urgency)) bad.push('urgency');\n  if (!SENT.includes(c.sentiment)) bad.push('sentiment');\n  c.confidence = Number(c.confidence);\n  if (!(c.confidence >= 0 && c.confidence <= 1)) bad.push('confidence');\n  if (typeof c.summary !== 'string' || !c.summary.trim()) bad.push('summary');\n  if (bad.length) error = 'invalid fields: ' + bad.join(', ');\n} catch (e) {\n  error = 'JSON parse failed: ' + (e.message ?? e);\n}\nconst ok = !error;\nconst words = ticket.message.split(/\\s+/).filter(Boolean).length;  // too short to say what the problem is\nconst status = !ok ? 'validation_error' : (c.confidence < 0.6 || words < 5 ? 'needs_manual_review' : 'opened');\nreturn { json: {\n  name: ticket.name, email: ticket.email, subject: ticket.subject, message: ticket.message,\n  category: ok ? c.category : 'unknown',\n  urgency: ok ? c.urgency : 'unknown',\n  sentiment: ok ? c.sentiment : 'unknown',\n  confidence: ok ? c.confidence : 0,\n  summary: ok ? c.summary : 'AI classification could not be validated',\n  status, error,\n  processing_log: `validated -> classified (${status})`,\n} };",
+        "mode": "runOnceForEachItem"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        280,
+        200
+      ],
+      "id": "be87393c-972c-46ee-a517-2a16eb3e023e",
+      "name": "Parse & validate classification"
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "loose",
+            "version": 3
+          },
+          "conditions": [
+            {
+              "id": "74565a0a-56f3-4b06-ac81-b088fa1ccab4",
+              "leftValue": "={{ $json.status !== 'validation_error' }}",
+              "rightValue": "",
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "looseTypeValidation": true,
+        "options": {}
+      },
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.3,
+      "position": [
+        500,
+        200
+      ],
+      "id": "b1109127-a407-44e4-a526-fb0ff5acac5b",
+      "name": "Classification valid?"
+    },
+    {
+      "parameters": {
+        "assignments": {
+          "assignments": [
+            {
+              "id": "5237c586-9b42-4d58-9fff-e4f5f9eff79f",
+              "name": "draft_response",
+              "value": "",
+              "type": "string"
+            },
+            {
+              "id": "37b5d679-4ebf-4b93-9f3b-545924046844",
+              "name": "knowledge_sources",
+              "value": "none",
+              "type": "string"
+            },
+            {
+              "id": "bc175277-8d5f-4eea-a4e8-9d5dd7331495",
+              "name": "processing_log",
+              "value": "={{ $json.processing_log + ' -> stopped: ' + $json.error }}",
+              "type": "string"
+            }
+          ]
+        },
+        "includeOtherFields": true,
+        "options": {}
+      },
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.4,
+      "position": [
+        720,
+        460
+      ],
+      "id": "25d9340c-a878-46d0-8a21-99bc8e82f6ed",
+      "name": "Mark validation error"
+    },
+    {
+      "parameters": {
+        "mode": "load",
+        "qdrantCollection": {
+          "__rl": true,
+          "value": "support_kb",
+          "mode": "list",
+          "cachedResultName": "support_kb"
+        },
+        "prompt": "={{ $json.subject + '\\n' + $json.message }}",
+        "topK": 3,
+        "options": {}
+      },
+      "type": "@n8n/n8n-nodes-langchain.vectorStoreQdrant",
+      "typeVersion": 1.3,
+      "position": [
+        720,
+        100
+      ],
+      "id": "b4700d36-1f43-4b85-8191-71b0a9b418ed",
+      "name": "Qdrant Vector Store",
+      "alwaysOutputData": true,
+      "retryOnFail": true,
+      "maxTries": 2
+    },
+    {
+      "parameters": {
+        "options": {}
+      },
+      "type": "@n8n/n8n-nodes-langchain.embeddingsOpenAi",
+      "typeVersion": 1.2,
+      "position": [
+        740,
+        320
+      ],
+      "id": "b710e247-10a2-4aeb-9298-7e63e8baace2",
+      "name": "Embeddings OpenAI"
+    },
+    {
+      "parameters": {
+        "jsCode": "// Qdrant returns one item per chunk. Combine them into ONE item, so everything after runs once.\nconst ticket = $('Parse & validate classification').first().json;\nconst chunks = $input.all()\n  .map(i => ({ text: i.json.document?.pageContent ?? '', score: Number(i.json.score ?? 0) }))\n  .filter(c => c.text.trim());\nconst top = chunks.length ? Math.max(...chunks.map(c => c.score)) : 0;\nreturn [{ json: {\n  ...ticket,\n  context: chunks.map((c, i) => `[${i + 1}] (similarity ${c.score.toFixed(2)})\\n${c.text}`).join('\\n\\n'),\n  top_score: top,\n  knowledge_sources: chunks.length ? `Qdrant KB (${chunks.length} chunks, top ${top.toFixed(2)})` : 'none',\n  processing_log: `${ticket.processing_log} -> retrieved ${chunks.length} chunks (top ${top.toFixed(2)})`,\n} }];"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        960,
+        100
+      ],
+      "id": "ea23e060-88e9-44ca-82c9-f5491eabfa8f",
+      "name": "Combine retrieved chunks"
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "loose",
+            "version": 3
+          },
+          "conditions": [
+            {
+              "id": "437d5d24-ec61-4a50-ba2e-2f7df6fceefb",
+              "leftValue": "={{ $json.top_score >= 0.25 }}",
+              "rightValue": "",
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "looseTypeValidation": true,
+        "options": {}
+      },
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.3,
+      "position": [
+        1180,
+        100
+      ],
+      "id": "e2d5edf4-ee49-424a-b96c-ffc4e29fe0e0",
+      "name": "Relevant context found?"
+    },
+    {
+      "parameters": {
+        "modelId": {
+          "__rl": true,
+          "value": "gpt-4o-mini",
+          "mode": "list",
+          "cachedResultName": "GPT-4O-MINI"
+        },
+        "responses": {
+          "values": [
+            {
+              "content": "=### ROLE\nYou are an expert AI Support Assistant. Your goal is to draft a professional, grounded email response using ONLY the provided Knowledge Base Context.\n\n### INPUT DATA\n- Customer name: {{ $json.name }}\n- Customer ticket: {{ $json.subject }} - {{ $json.message }}\n- Customer sentiment: {{ $json.sentiment }}\n- Knowledge Base Context (top matches):\n{{ $json.context }}\n\n### EXECUTION RULES\n1. STRICT GROUNDING: Use ONLY the Knowledge Base Context. If it does not contain the answer, say that a support agent will follow up; do not guess.\n2. TONE MATCHING: If sentiment is 'negative', be empathetic and apologetic. If 'neutral' or 'positive', be concise and professional.\n3. NO HALLUCINATION: Do not invent names, dates, amounts or procedures that are not in the context.\n4. STRUCTURE: greeting, direct answer, clear next steps, sign-off.\n\n### OUTPUT\nOutput only the final email draft. No preamble. Sign as: NOAVIA Support Team. Never use placeholders such as [Your Name]."
+            }
+          ]
+        },
+        "builtInTools": {},
+        "options": {}
+      },
+      "type": "@n8n/n8n-nodes-langchain.openAi",
+      "typeVersion": 2.1,
+      "position": [
+        1400,
+        0
+      ],
+      "id": "016d83cc-02fd-42f2-bb36-4ad7795715dc",
+      "name": "Draft grounded reply",
+      "retryOnFail": true,
+      "maxTries": 2,
+      "onError": "continueRegularOutput"
+    },
+    {
+      "parameters": {
+        "jsCode": "const t = $('Combine retrieved chunks').item.json;\nconst draft = $json.output?.[0]?.content?.[0]?.text ?? '';\nreturn { json: {\n  ...t,\n  draft_response: draft,\n  status: draft ? t.status : 'needs_manual_review',\n  processing_log: `${t.processing_log} -> ${draft ? 'draft generated' : 'draft failed'}`,\n} };",
+        "mode": "runOnceForEachItem"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1620,
+        0
+      ],
+      "id": "5cbbcf62-f3e8-4c2a-90f0-318c0d4bf787",
+      "name": "Attach draft"
+    },
+    {
+      "parameters": {
+        "assignments": {
+          "assignments": [
+            {
+              "id": "f5fdba92-1ea7-4fad-94e6-8553778227d9",
+              "name": "draft_response",
+              "value": "No specific policy was found in the knowledge base for this request. A support agent will review it and reply.",
+              "type": "string"
+            },
+            {
+              "id": "d7524987-ad71-4233-8dc0-1a9cdcfd2763",
+              "name": "knowledge_sources",
+              "value": "none",
+              "type": "string"
+            },
+            {
+              "id": "1c655c4f-d6a2-45c6-bbbd-300a1c348b87",
+              "name": "processing_log",
+              "value": "={{ $json.processing_log + ' -> fallback (no relevant policy)' }}",
+              "type": "string"
+            }
+          ]
+        },
+        "includeOtherFields": true,
+        "options": {}
+      },
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.4,
+      "position": [
+        1400,
+        240
+      ],
+      "id": "3ddf5352-7e16-4f37-88e5-866351f7b186",
+      "name": "Fallback draft"
+    },
+    {
+      "parameters": {},
+      "type": "n8n-nodes-base.noOp",
+      "typeVersion": 1,
+      "position": [
+        1840,
+        240
+      ],
+      "id": "8a653caa-7cc7-4268-8b73-f2c1688543f9",
+      "name": "Final ticket"
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "loose",
+            "version": 3
+          },
+          "conditions": [
+            {
+              "id": "66200ed0-6dba-4119-9600-94abeb014016",
+              "leftValue": "={{ $json.status === 'opened' && ['critical', 'high'].includes($json.urgency) }}",
+              "rightValue": "",
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "looseTypeValidation": true,
+        "options": {}
+      },
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.3,
+      "position": [
+        2060,
+        240
+      ],
+      "id": "f6e7943a-9d2d-4bd0-9c02-4476b499ea23",
+      "name": "Urgent and confident?"
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "loose",
+            "version": 3
+          },
+          "conditions": [
+            {
+              "id": "ddaff772-0205-4e76-858c-748cf0fac223",
+              "leftValue": "={{ $json.status === 'opened' && $json.urgency === 'medium' }}",
+              "rightValue": "",
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "looseTypeValidation": true,
+        "options": {}
+      },
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.3,
+      "position": [
+        2280,
+        380
+      ],
+      "id": "575caaa8-ec65-4c17-961d-995c0826c97c",
+      "name": "Medium and confident?"
+    },
+    {
+      "parameters": {
+        "fromEmail": "support-team@example.com",
+        "toEmail": "support-team@example.com",
+        "subject": "=Urgent ticket - {{ $json.category }}",
+        "html": "=<h3>Urgent Support Ticket</h3>\n<b>Name:</b> {{ $json.name }}<br>\n<b>Email:</b> {{ $json.email }}<br>\n<p><b>Category:</b> {{ $json.category }} | <b>Urgency:</b> {{ $json.urgency }} | <b>Sentiment:</b> {{ $json.sentiment }} | <b>Confidence:</b> {{ $json.confidence }}</p>\n<p><b>Summary:</b><br>{{ $json.summary }}</p>\n<p><b>Suggested response:</b><br>{{ $json.draft_response }}</p>\n<p><i>Sources: {{ $json.knowledge_sources }}</i></p>",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.emailSend",
+      "typeVersion": 2.1,
+      "position": [
+        2280,
+        100
+      ],
+      "id": "34876406-e262-49b8-b283-f6a62e278951",
+      "name": "Send urgent email",
+      "webhookId": "a5c1495b-ba75-4e34-ad28-d8ad3f764677",
+      "retryOnFail": true,
+      "maxTries": 2,
+      "onError": "continueRegularOutput"
+    },
+    {
+      "parameters": {
+        "fromEmail": "support-team@example.com",
+        "toEmail": "support-team@example.com",
+        "subject": "=Medium support ticket - {{ $json.category }}",
+        "html": "=<h3>Medium Priority Support Ticket</h3>\n<b>Name:</b> {{ $json.name }}<br>\n<b>Email:</b> {{ $json.email }}<br>\n<b>Category:</b> {{ $json.category }}<br>\n<hr><b>Customer message</b><p>{{ $json.message }}</p>\n<hr><b>AI summary</b><p>{{ $json.summary }}</p>\n<hr><i>Logged to Google Sheets.</i>",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.emailSend",
+      "typeVersion": 2.1,
+      "position": [
+        2500,
+        300
+      ],
+      "id": "9750a6ca-3cf1-4dcf-9102-12c6dbeb534c",
+      "name": "Send summary email",
+      "webhookId": "e63be1c7-fa31-411e-9120-3086129ec3d0",
+      "retryOnFail": true,
+      "maxTries": 2,
+      "onError": "continueRegularOutput"
+    },
+    {
+      "parameters": {
+        "operation": "append",
+        "documentId": {
+          "__rl": true,
+          "value": "YOUR_GOOGLE_SHEET_ID",
+          "mode": "id"
+        },
+        "sheetName": {
+          "__rl": true,
+          "value": "Sheet1",
+          "mode": "name"
+        },
+        "columns": {
+          "mappingMode": "defineBelow",
+          "value": {
+            "ticket_id": "={{ 'TICKET-' + $now.toMillis() }}",
+            "timestamp": "={{ $now.toISO() }}",
+            "name": "={{ $('Final ticket').first().json.name }}",
+            "email": "={{ $('Final ticket').first().json.email }}",
+            "subject": "={{ $('Final ticket').first().json.subject }}",
+            "message": "={{ $('Final ticket').first().json.message }}",
+            "category": "={{ $('Final ticket').first().json.category }}",
+            "urgency": "={{ $('Final ticket').first().json.urgency }}",
+            "sentiment": "={{ $('Final ticket').first().json.sentiment }}",
+            "confidence": "={{ $('Final ticket').first().json.confidence }}",
+            "summary": "={{ $('Final ticket').first().json.summary }}",
+            "draft_response": "={{ $('Final ticket').first().json.draft_response }}",
+            "knowledge_sources": "={{ $('Final ticket').first().json.knowledge_sources }}",
+            "processing_log": "={{ $('Final ticket').first().json.processing_log }}",
+            "status": "={{ $('Final ticket').first().json.status }}"
+          },
+          "matchingColumns": [],
+          "schema": [
+            {
+              "id": "ticket_id",
+              "displayName": "ticket_id",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "timestamp",
+              "displayName": "timestamp",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "name",
+              "displayName": "name",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "email",
+              "displayName": "email",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "subject",
+              "displayName": "subject",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "message",
+              "displayName": "message",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "category",
+              "displayName": "category",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "urgency",
+              "displayName": "urgency",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "sentiment",
+              "displayName": "sentiment",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "confidence",
+              "displayName": "confidence",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "summary",
+              "displayName": "summary",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "draft_response",
+              "displayName": "draft_response",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "knowledge_sources",
+              "displayName": "knowledge_sources",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "status",
+              "displayName": "status",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "processing_log",
+              "displayName": "processing_log",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            }
+          ],
+          "attemptToConvertTypes": false,
+          "convertFieldsToString": false
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4.7,
+      "position": [
+        2720,
+        240
+      ],
+      "id": "51861cc7-709c-4fa9-a716-7b0c0629a4cb",
+      "name": "Append row in sheet",
+      "executeOnce": true,
+      "retryOnFail": true,
+      "maxTries": 2,
+      "onError": "continueRegularOutput"
+    }
+  ],
+  "pinData": {},
+  "connections": {
+    "Webhook": {
+      "main": [
+        [
+          {
+            "node": "Validate ticket",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Validate ticket": {
+      "main": [
+        [
+          {
+            "node": "Ticket valid?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Ticket valid?": {
+      "main": [
+        [
+          {
+            "node": "Classify ticket",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Reject invalid ticket",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Classify ticket": {
+      "main": [
+        [
+          {
+            "node": "Parse & validate classification",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Parse & validate classification": {
+      "main": [
+        [
+          {
+            "node": "Classification valid?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Classification valid?": {
+      "main": [
+        [
+          {
+            "node": "Qdrant Vector Store",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Mark validation error",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Embeddings OpenAI": {
+      "ai_embedding": [
+        [
+          {
+            "node": "Qdrant Vector Store",
+            "type": "ai_embedding",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Qdrant Vector Store": {
+      "main": [
+        [
+          {
+            "node": "Combine retrieved chunks",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Combine retrieved chunks": {
+      "main": [
+        [
+          {
+            "node": "Relevant context found?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Relevant context found?": {
+      "main": [
+        [
+          {
+            "node": "Draft grounded reply",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Fallback draft",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Draft grounded reply": {
+      "main": [
+        [
+          {
+            "node": "Attach draft",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Attach draft": {
+      "main": [
+        [
+          {
+            "node": "Final ticket",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Fallback draft": {
+      "main": [
+        [
+          {
+            "node": "Final ticket",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Mark validation error": {
+      "main": [
+        [
+          {
+            "node": "Final ticket",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Final ticket": {
+      "main": [
+        [
+          {
+            "node": "Urgent and confident?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Urgent and confident?": {
+      "main": [
+        [
+          {
+            "node": "Send urgent email",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Medium and confident?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Medium and confident?": {
+      "main": [
+        [
+          {
+            "node": "Send summary email",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Append row in sheet",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Send urgent email": {
+      "main": [
+        [
+          {
+            "node": "Append row in sheet",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Send summary email": {
+      "main": [
+        [
+          {
+            "node": "Append row in sheet",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": false,
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "meta": {},
+  "tags": []
+}

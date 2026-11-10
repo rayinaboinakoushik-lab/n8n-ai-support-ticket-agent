@@ -1,0 +1,4 @@
+.env
+n8n_data/
+qdrant_storage/
+*.log
